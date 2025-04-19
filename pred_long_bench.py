@@ -106,11 +106,13 @@ if __name__ == '__main__':
     model_name = model_args.model_name_or_path.split("/")[-1]
     # dtype = torch.bfloat16 if training_args.bf16 else torch.float
     dtype = torch.float16
+        
+    # model_args.model_name_or_path = '/mnt/nvme4n1@164/tzj/models/Llama-3.1-8B-Instruct/'
     
     if 'llama' in model_args.model_name_or_path.lower() or 'longchat' in model_args.model_name_or_path.lower():
         config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, 
-                                            use_fast=False, 
+        tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-8B-Instruct', 
+                                            use_fast=True, 
                                             trust_remote_code=True, 
                                             tokenizer_type='llama')
                                             # model_max_length=training_args.model_max_length)
@@ -203,12 +205,12 @@ if __name__ == '__main__':
         os.makedirs("pred_e")
     for dataset in datasets:
         if data_args.e:
-            data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
+            data = load_dataset('/mnt/nvme4n1@164/tzj/datasets/LongBench', f"{dataset}_e", split='test')
             if not os.path.exists(f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}"):
                 os.makedirs(f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}")
             out_path = f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}/{dataset}.jsonl"
         else:
-            data = load_dataset('THUDM/LongBench', dataset, split='test')
+            data = load_dataset('/mnt/nvme4n1@164/tzj/datasets/LongBench', dataset, split='test')
             if not os.path.exists(f"pred/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}"):
                 os.makedirs(f"pred/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}")
             out_path = f"pred/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}/{dataset}.jsonl"
