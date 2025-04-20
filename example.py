@@ -5,7 +5,11 @@ import torch
 import random
 from models.llama_kivi import LlamaForCausalLM_KIVI
 from transformers import LlamaConfig, AutoTokenizer
+from quant.new_pack import quant_and_pack_vcache, unpack_and_dequant_kcache, triton_quantize_and_pack_along_last_dim, unpack_and_dequant_vcache, quant_and_pack_kcache
 from datasets import load_dataset
+
+import numpy as np
+np.set_printoptions(precision=4, suppress=True)
 
 torch.cuda.set_device(1)  # 设置使用 GPU2（索引1）
 
@@ -23,6 +27,7 @@ config.v_bits = 2
 config.group_size = 32 
 config.residual_length = 32 # corresponding to the number of recent fp16 tokens
 config.use_flash = True
+config.smooth_step = 8
 
 model = LlamaForCausalLM_KIVI.from_pretrained(
     # pretrained_model_name_or_path='meta-llama/{MODEL_NAME}
@@ -52,14 +57,53 @@ config_str = f"# prompt tokens: {inputs.shape[1]}, K bit: {config.k_bits}, v_bit
 print(prompt + "\n" + "=" * 10 + f'\n{config_str}\n' + "=" * 10 + "\nKiVi Output:")
 print(enc.decode(output[0].tolist()[inputs.shape[1]:], skip_special_tokens=True))
 
+# NOTICE: we must use `use_cache=True` to get the past_key_values
 outputs = model(inputs, use_cache=True, output_attentions=True, output_hidden_states=True)
     
 attentions = outputs.attentions
 past_key_values = outputs.past_key_values
-# past_key_values = torch.cat([outputs.past_key_values[1], outputs.past_key_values[5]], dim=0)
 
 __import__('pdb').set_trace()
 
-torch.save(past_key_values, f'./{MODEL_NAME}_kvcache.pt')
+kvcache = []
+for layer_id in range(len(past_key_values)):
+    key_states_quant_trans  = past_key_values[layer_id][0]     # qval.T       
+    key_states_full         = past_key_values[layer_id][1]                    
+    key_scale_trans         = past_key_values[layer_id][2]     # scale.T      
+    key_mn_trans            = past_key_values[layer_id][3]     # zero_point.T 
+    value_states_quant      = past_key_values[layer_id][4]     # qval.        
+    value_states_full       = past_key_values[layer_id][5]                    
+    value_scale             = past_key_values[layer_id][6]     # scale        
+    value_mn                = past_key_values[layer_id][7]     # zero_point   
+    # NOTE: Add `smooth varible.` 
+    key_states_smooth       = past_key_values[layer_id][8]     # key_states_smooth
+    value_states_smooth     = past_key_values[layer_id][9]     # value_states_smooth
+
+    # NOTE: Dequantized  key and value.
+    dequant_key = unpack_and_dequant_kcache(
+        key_states_quant_trans, 
+        key_scale_trans.unsqueeze(-1), 
+        key_mn_trans.unsqueeze(-1), 
+        config.group_size, 
+        config.k_bits
+    ).transpose(2, 3)
+
+    # NOTE: Subtract the smooth variable.
+    batch, num_heads, seq_len, dim = dequant_key.shape
+    dequant_key = dequant_key.view(batch, num_heads, -1, config.group_size, dim) - key_states_smooth.unsqueeze(3).expand(-1, -1, -1, config.group_size, -1)
+    dequant_key = dequant_key.view(batch, num_heads, seq_len, dim)
+
+    dequant_value = unpack_and_dequant_vcache(
+        value_states_quant, 
+        value_scale.unsqueeze(-1), 
+        value_mn.unsqueeze(-1), 
+        config.group_size, 
+        config.v_bits
+    )
+    kvcache.append([dequant_key, dequant_value])
+
+__import__('pdb').set_trace()
+
+torch.save(kvcache, f'./{MODEL_NAME}_kvcache.pt')
 torch.save(attentions, f'./{MODEL_NAME}_attention.pt')
 

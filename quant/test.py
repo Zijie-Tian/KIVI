@@ -172,7 +172,6 @@ def test_streaming_kvcache():
 		att_out_gap = (ref_att_out - our_attn_output) / ref_att_out
 		print(f'i {i} bit {bits}, mean att out rel arr: {torch.mean(torch.abs(att_out_gap))}')
 
-
 def test_4d_qmatmul():
 	torch.manual_seed(0)
 	np.random.seed(0)
@@ -203,7 +202,6 @@ def test_4d_qmatmul():
 		gap = torch.nan_to_num(gap)
 		err = torch.mean(torch.abs(gap)).item()
 		print(f'bits {bits}, err: {err}')
-
 
 if __name__ == '__main__':
 	set_seed(114514)

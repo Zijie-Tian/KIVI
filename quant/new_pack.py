@@ -155,8 +155,6 @@ def _pack_along_last_dim(
         packed = packed | element
     tl.store(code_ptr + offs_N * num_int_per_y_dim + yid, packed, mask=offs_N < N)
 
-
-
 @triton.jit
 def _minmax_along_last_dim(
     x_ptr,
