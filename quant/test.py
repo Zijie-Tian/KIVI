@@ -22,13 +22,14 @@ def test_vcache():
 	torch.manual_seed(0)
 	np.random.seed(0)
 	random.seed(0)
-	B, nh, T, hd = 555, 32, 433, 128
+	B, nh, T, hd = 1, 32, 433, 128
 	v = torch.randn((B, nh, T, hd), device='cuda', dtype=torch.float16)
 	group_size = 64
 	for bits in [2, 4, 8]:
 		code, scale, mn = triton_quantize_and_pack_along_last_dim(v, group_size, bits)
 		# print(f'bit {bits}, scale.shape: {scale.shape}')
 		# print(f'bit {bits}, code.shape: {code.shape}')
+        #
 		dequant_v = unpack_and_dequant_vcache(code, scale.unsqueeze(-1), mn.unsqueeze(-1), group_size, bits)
 		assert not dequant_v.isnan().any()
 		gap = (dequant_v - v) / v
@@ -40,14 +41,16 @@ def test_kcache():
 	torch.manual_seed(0)
 	np.random.seed(0)
 	random.seed(0)
-	BS, nh, T, D = 11, 32, 4096, 128
+	BS, nh, T, D = 1, 32, 512, 128
 	k = torch.randn((BS, nh, T, D), device='cuda', dtype=torch.float16)
 	group_size = 64
 	for bits in [2, 4, 8]:
 		code, scale, mn = triton_quantize_and_pack_along_last_dim(k.transpose(2, 3).contiguous(), 
 															group_size, 
 															bits)
-		dequant_k = unpack_and_dequant_vcache(code, scale.unsqueeze(-1), mn.unsqueeze(-1), group_size, bits)
+        # NOTICE: Here we use dequant_v_cache.
+		# dequant_k = unpack_and_dequant_vcache(code, scale.unsqueeze(-1), mn.unsqueeze(-1), group_size, bits)
+		dequant_k = unpack_and_dequant_kcache(code, scale.unsqueeze(-1), mn.unsqueeze(-1), group_size, bits)
 		assert not dequant_k.isnan().any()
 		gap = (dequant_k.transpose(2, 3) - k) / k
 		gap = torch.nan_to_num(gap)
@@ -204,8 +207,8 @@ def test_4d_qmatmul():
 
 if __name__ == '__main__':
 	set_seed(114514)
-	# test_kcache()
-	# test_vcache()
+	test_kcache()
+	test_vcache()
 	# test_4d_qmatmul()
 	# test_streaming_kvcache()
-	test_bmm_speed()
+	# test_bmm_speed()

@@ -9,7 +9,7 @@ import argparse
 os.environ["WANDB_DISABLED"] = "true"
 
 from utils.process_args import process_args
-from transformers import LlamaConfig, MistralConfig, AutoTokenizer
+from transformers import LlamaConfig, MistralConfig, AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 
 # This is the customized building prompt for chat models
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     
     if 'llama' in model_args.model_name_or_path.lower() or 'longchat' in model_args.model_name_or_path.lower():
         config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-8B-Instruct', 
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, 
                                             use_fast=True, 
                                             trust_remote_code=True, 
                                             tokenizer_type='llama')
@@ -121,6 +121,10 @@ if __name__ == '__main__':
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, 
                                             use_fast=False, 
                                             trust_remote_code=True)
+    elif "falcon" in model_args.model_name_or_path.lower():
+        config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=True, trust_remote_code=True)
+    
     else:
         raise NotImplementedError
     
@@ -179,7 +183,6 @@ if __name__ == '__main__':
                 use_flash_attention_2=True,
                 device_map="auto",
             )
-
     else:
         raise NotImplementedError
 
@@ -205,11 +208,12 @@ if __name__ == '__main__':
         os.makedirs("pred_e")
     for dataset in datasets:
         if data_args.e:
-            data = load_dataset('/mnt/nvme4n1@164/tzj/datasets/LongBench', f"{dataset}_e", split='test')
+            data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
             if not os.path.exists(f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}"):
                 os.makedirs(f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}")
             out_path = f"pred_e/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}/{dataset}.jsonl"
         else:
+            # data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
             data = load_dataset('/mnt/nvme4n1@164/tzj/datasets/LongBench', dataset, split='test')
             if not os.path.exists(f"pred/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}"):
                 os.makedirs(f"pred/{model_name}_{max_length}_{model_args.k_bits}bits_group{model_args.group_size}_residual{model_args.residual_length}")

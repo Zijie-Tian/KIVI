@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from quant.new_pack import triton_quantize_and_pack_along_last_dim
+from quant.new_pack import triton_quantize_and_pack_along_last_dim, unpack_and_dequant_kcache, unpack_and_dequant_vcache
 from quant.matmul import cuda_bmm_fA_qB_outer
 
 from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings
@@ -73,7 +73,7 @@ class LlamaAttention_KIVI(nn.Module):
             )
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:
+        if self.config.pretraining_tp > 1:       # zero_point.T
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
             query_slices = self.q_proj.weight.split(
                 (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
@@ -95,9 +95,9 @@ class LlamaAttention_KIVI(nn.Module):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states    = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states      = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states    = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -107,14 +107,14 @@ class LlamaAttention_KIVI(nn.Module):
         assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
-            key_states_quant_trans = past_key_value[0]
-            key_states_full = past_key_value[1]
-            key_scale_trans = past_key_value[2]
-            key_mn_trans = past_key_value[3]
-            value_states_quant = past_key_value[4]
-            value_states_full = past_key_value[5]
-            value_scale = past_key_value[6]
-            value_mn = past_key_value[7]
+            key_states_quant_trans  = past_key_value[0]     # qval.T
+            key_states_full         = past_key_value[1]
+            key_scale_trans         = past_key_value[2]     # scale.T
+            key_mn_trans            = past_key_value[3]     # zero_point.T
+            value_states_quant      = past_key_value[4]     # qval.
+            value_states_full       = past_key_value[5]
+            value_scale             = past_key_value[6]     # scale
+            value_mn                = past_key_value[7]     # zero_point
 
             if key_states_quant_trans is not None:
                 att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
@@ -122,6 +122,13 @@ class LlamaAttention_KIVI(nn.Module):
             else:
                 att_qkquant = None
 
+            dequant_key = unpack_and_dequant_kcache(key_states_quant_trans.transpose(2,3), key_scale_trans.transpose(2,3), key_mn_trans.transpose(2,3), self.k_bits)
+            gap = (dequant_key - key_states_full) / key_states_full
+            gap = torch.nan_to_num(gap)
+
+            __import__('pdb').set_trace()
+
+            #> Concat the KV cache.
             if key_states_full is not None:
                 key_states_full = torch.cat([key_states_full, key_states], dim=2)
             else:
@@ -316,17 +323,29 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
-            key_states_quant_trans = past_key_value[0]
-            key_states_full = past_key_value[1]
-            key_scale_trans = past_key_value[2]
-            key_mn_trans = past_key_value[3]
-            value_states_quant = past_key_value[4]
-            value_states_full = past_key_value[5]
-            value_scale = past_key_value[6]
-            value_mn = past_key_value[7]
+            key_states_quant_trans  = past_key_value[0]
+            key_states_full         = past_key_value[1]
+            key_scale_trans         = past_key_value[2]
+            key_mn_trans            = past_key_value[3]
+            value_states_quant      = past_key_value[4]
+            value_states_full       = past_key_value[5]
+            value_scale             = past_key_value[6]
+            value_mn                = past_key_value[7]
             if key_states_quant_trans is not None:
-                att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
-                                key_scale_trans, key_mn_trans, self.k_bits)
+                # att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
+                #                 key_scale_trans, key_mn_trans, self.k_bits)
+
+                # NOTICE: Changed to pesudo quant
+                dequant_key = unpack_and_dequant_kcache(
+                    key_states_quant_trans, 
+                    key_scale_trans.unsqueeze(-1), 
+                    key_mn_trans.unsqueeze(-1), 
+                    self.group_size, 
+                    self.k_bits
+                ).transpose(2, 3)
+                att_qkquant_ref = torch.einsum("bhqd,bhkd->bhqk", query_states, dequant_key)
+                att_qkquant = att_qkquant_ref
+
                 # att_qkquant_ref = triton_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
                 #                 key_scale_trans, key_mn_trans, self.k_bits)
                 # error = torch.abs(att_qkquant - att_qkquant_ref).float()
@@ -383,9 +402,24 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             if value_states_quant is None:
                 attn_output = torch.matmul(attn_weights, value_states_full)
             else:
-                attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
-                                                value_scale, value_mn, self.v_bits)
-                attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
+                # attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
+                #                                 value_scale, value_mn, self.v_bits)
+
+                dequant_value = unpack_and_dequant_vcache(
+                    value_states_quant, 
+                    value_scale.unsqueeze(-1), 
+                    value_mn.unsqueeze(-1), 
+                    self.group_size, 
+                    self.v_bits
+                )
+                attn_output_ref = torch.einsum("bhqk,bhkd->bhqd", attn_weights[:, :, :, :-value_full_length], dequant_value)
+                attn_output = attn_output_ref
+
+                try :
+                    attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
+                except RuntimeError as e:
+                    __import__('pdb').set_trace()
+
             attn_output = attn_output.transpose(1, 2).contiguous()
             if value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
