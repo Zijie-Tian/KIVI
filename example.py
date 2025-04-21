@@ -27,6 +27,7 @@ config.v_bits = 2
 config.group_size = 32 
 config.residual_length = 32 # corresponding to the number of recent fp16 tokens
 config.use_flash = True
+# TODO: USE following config to evaluate smoothing mechianism
 config.smooth_step = 8
 
 model = LlamaForCausalLM_KIVI.from_pretrained(
@@ -86,7 +87,7 @@ for layer_id in range(len(past_key_values)):
         key_mn_trans.unsqueeze(-1), 
         config.group_size, 
         config.k_bits
-    ).transpose(2, 3)
+    )
 
     # NOTE: Subtract the smooth variable.
     batch, num_heads, seq_len, dim = dequant_key.shape

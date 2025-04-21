@@ -29,8 +29,8 @@ attentions = torch.load(attn_filename, map_location='cpu', weights_only=False)
 for layer_id in [3, 8, 14, 16, 18, 20, 31]:  # Replace with your layer ids
     head_id = 0
     k, v = kvcache[layer_id][0].squeeze(0), kvcache[layer_id][1].squeeze(0)
-    k = torch.sort(k, dim=-1)[0]
-    v = torch.sort(v, dim=-1)[0]
+    # k = torch.sort(k, dim=-1)[0]
+    # v = torch.sort(v, dim=-1)[0]
 
     # k, v = kvcache[layer_id][1].squeeze(0), kvcache[layer_id][5].squeeze(0)
     k = k.transpose(0, 1).abs().detach().numpy()
