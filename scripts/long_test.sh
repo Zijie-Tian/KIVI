@@ -1,5 +1,7 @@
 # model e.g.: meta-llama/Llama-2-7b-hf
 
+export HF_ENDPOINT=https://hf-mirror.com
+
 gpuid=$1
 k_bits=$2
 v_bits=$3

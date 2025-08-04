@@ -55,7 +55,9 @@ class LlamaAttention_KIVI(nn.Module):
         self.v_bits = config.v_bits
         self.group_size = config.group_size
         self.residual_length = config.residual_length
-        assert getattr(config, "use_flash", False), "currently KIVI is only available for flash-attn. Please add ```config.use_flash = True```"
+        assert getattr(config, "use_flash", False), (
+            "currently KIVI is only available for flash-attn. Please add ```config.use_flash = True```"
+        )
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -63,15 +65,30 @@ class LlamaAttention_KIVI(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias
+        )
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
-
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -89,21 +106,32 @@ class LlamaAttention_KIVI(nn.Module):
             )
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:       # zero_point.T
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        if self.config.pretraining_tp > 1:  # zero_point.T
+            key_value_slicing = (
+                self.num_key_value_heads * self.head_dim
+            ) // self.config.pretraining_tp
             query_slices = self.q_proj.weight.split(
                 (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [
+                F.linear(hidden_states, query_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [
+                F.linear(hidden_states, key_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [
+                F.linear(hidden_states, value_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
@@ -111,56 +139,87 @@ class LlamaAttention_KIVI(nn.Module):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        query_states    = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states      = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states    = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
         assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
-            key_states_quant_trans  = past_key_value[0]     # qval.T
-            key_states_full         = past_key_value[1]
-            key_scale_trans         = past_key_value[2]     # scale.T
-            key_mn_trans            = past_key_value[3]     # zero_point.T
-            value_states_quant      = past_key_value[4]     # qval.
-            value_states_full       = past_key_value[5]
-            value_scale             = past_key_value[6]     # scale
-            value_mn                = past_key_value[7]     # zero_point
+            key_states_quant_trans = past_key_value[0]  # qval.T
+            key_states_full = past_key_value[1]
+            key_scale_trans = past_key_value[2]  # scale.T
+            key_mn_trans = past_key_value[3]  # zero_point.T
+            value_states_quant = past_key_value[4]  # qval.
+            value_states_full = past_key_value[5]
+            value_scale = past_key_value[6]  # scale
+            value_mn = past_key_value[7]  # zero_point
 
             if key_states_quant_trans is not None:
-                att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
-                                key_scale_trans, key_mn_trans, self.k_bits)
+                att_qkquant = cuda_bmm_fA_qB_outer(
+                    self.group_size,
+                    query_states,
+                    key_states_quant_trans,
+                    key_scale_trans,
+                    key_mn_trans,
+                    self.k_bits,
+                )
             else:
                 att_qkquant = None
 
-            dequant_key = unpack_and_dequant_kcache(key_states_quant_trans.transpose(2,3), key_scale_trans.transpose(2,3), key_mn_trans.transpose(2,3), self.k_bits)
+            dequant_key = unpack_and_dequant_kcache(
+                key_states_quant_trans.transpose(2, 3),
+                key_scale_trans.transpose(2, 3),
+                key_mn_trans.transpose(2, 3),
+                self.k_bits,
+            )
 
-            #> Concat the KV cache.
+            # > Concat the KV cache.
             if key_states_full is not None:
-                key_states_full = torch.cat([key_states_full, key_states], dim=2) # NOTE: Append the new kv cache.
+                key_states_full = torch.cat(
+                    [key_states_full, key_states], dim=2
+                )  # NOTE: Append the new kv cache.
             else:
                 key_states_full = key_states
             att_qkfull = torch.matmul(query_states, key_states_full.transpose(2, 3))
             if att_qkquant is not None:
-                attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(self.head_dim)
+                attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(
+                    self.head_dim
+                )
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
 
             if key_states_full.shape[-2] == self.residual_length:
                 assert self.residual_length % self.group_size == 0
-                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), 
-                                                                                                                            self.group_size, 
-                                                                                                                            self.k_bits)
+                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = (
+                    triton_quantize_and_pack_along_last_dim(
+                        key_states_full.transpose(2, 3).contiguous(),
+                        self.group_size,
+                        self.k_bits,
+                    )
+                )
 
                 key_states_full = None
                 if key_states_quant_trans is not None:
-                    key_states_quant_trans = torch.cat([key_states_quant_trans, key_states_quant_trans_new], dim=3)
-                    key_scale_trans = torch.cat([key_scale_trans, key_scale_trans_new], dim=3)
+                    key_states_quant_trans = torch.cat(
+                        [key_states_quant_trans, key_states_quant_trans_new], dim=3
+                    )
+                    key_scale_trans = torch.cat(
+                        [key_scale_trans, key_scale_trans_new], dim=3
+                    )
                     key_mn_trans = torch.cat([key_mn_trans, key_mn_trans_new], dim=3)
                 else:
                     key_states_quant_trans = key_states_quant_trans_new
@@ -184,25 +243,41 @@ class LlamaAttention_KIVI(nn.Module):
                 )
 
             # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
 
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
             if value_states_quant is None:
                 attn_output = torch.matmul(attn_weights, value_states_full)
             else:
-                attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
-                                                value_scale, value_mn, self.v_bits)
-                attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], value_states_full)
-            
+                attn_output = cuda_bmm_fA_qB_outer(
+                    self.group_size,
+                    attn_weights[:, :, :, :-value_full_length],
+                    value_states_quant,
+                    value_scale,
+                    value_mn,
+                    self.v_bits,
+                )
+                attn_output += torch.matmul(
+                    attn_weights[:, :, :, -value_full_length:], value_states_full
+                )
+
             if value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
-                value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), 
-                                                                                                self.group_size, 
-                                                                                                self.v_bits)
+                value_states_quant_new, scale, mn = (
+                    triton_quantize_and_pack_along_last_dim(
+                        value_states_full[:, :, :1, :].contiguous(),
+                        self.group_size,
+                        self.v_bits,
+                    )
+                )
                 value_states_full = value_states_full[:, :, 1:, :].contiguous()
                 if value_states_quant is not None:
-                    value_states_quant = torch.cat([value_states_quant, value_states_quant_new], dim=2)
+                    value_states_quant = torch.cat(
+                        [value_states_quant, value_states_quant_new], dim=2
+                    )
                     value_scale = torch.cat([value_scale, scale], dim=2)
                     value_mn = torch.cat([value_mn, mn], dim=2)
                 else:
@@ -211,37 +286,54 @@ class LlamaAttention_KIVI(nn.Module):
                     value_mn = mn
 
         else:
-            attn_weights = torch.matmul(query_states, 
-                                        key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_weights = torch.matmul(
+                query_states, key_states.transpose(2, 3)
+            ) / math.sqrt(self.head_dim)
             # quantize
             if key_states.shape[-2] % self.residual_length != 0:
                 if key_states.shape[-2] < self.residual_length:
                     key_states_quant = None
                     key_states_full = key_states
                 else:
-                    key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :].contiguous()
-                    key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
+                    key_states_quant = key_states[
+                        :, :, : -(key_states.shape[-2] % self.residual_length), :
+                    ].contiguous()
+                    key_states_full = key_states[
+                        :, :, -(key_states.shape[-2] % self.residual_length) :, :
+                    ].contiguous()
             else:
                 key_states_quant = key_states
                 key_states_full = None
             if key_states_quant is not None:
-                key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(key_states_quant.transpose(2, 3).contiguous(), self.group_size, self.k_bits)
+                key_states_quant_trans, key_scale_trans, key_mn_trans = (
+                    triton_quantize_and_pack_along_last_dim(
+                        key_states_quant.transpose(2, 3).contiguous(),
+                        self.group_size,
+                        self.k_bits,
+                    )
+                )
             else:
                 key_states_quant_trans = None
                 key_scale_trans = None
                 key_mn_trans = None
-            
+
             if value_states.shape[-2] <= self.residual_length:
                 value_states_quant = None
                 value_states_full = value_states
                 value_scale = None
                 value_mn = None
             else:
-                value_states_quant = value_states[:, :, :-self.residual_length, :].contiguous()
-                value_states_full = value_states[:, :, -self.residual_length:, :].contiguous()
-                value_states_quant, value_scale, value_mn = triton_quantize_and_pack_along_last_dim(value_states_quant, 
-                                                                                                self.group_size, 
-                                                                                                self.v_bits)
+                value_states_quant = value_states[
+                    :, :, : -self.residual_length, :
+                ].contiguous()
+                value_states_full = value_states[
+                    :, :, -self.residual_length :, :
+                ].contiguous()
+                value_states_quant, value_scale, value_mn = (
+                    triton_quantize_and_pack_along_last_dim(
+                        value_states_quant, self.group_size, self.v_bits
+                    )
+                )
 
             if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
                 raise ValueError(
@@ -264,8 +356,22 @@ class LlamaAttention_KIVI(nn.Module):
                 attn_weights, dim=-1, dtype=torch.float32
             ).to(query_states.dtype)
 
-            attn_output = torch.matmul(attn_weights, value_states) 
-        past_key_value = (key_states_quant_trans, key_states_full, key_scale_trans, key_mn_trans, value_states_quant, value_states_full, value_scale, value_mn, kv_seq_len) if use_cache else None
+            attn_output = torch.matmul(attn_weights, value_states)
+        past_key_value = (
+            (
+                key_states_quant_trans,
+                key_states_full,
+                key_scale_trans,
+                key_mn_trans,
+                value_states_quant,
+                value_states_full,
+                value_scale,
+                value_mn,
+                kv_seq_len,
+            )
+            if use_cache
+            else None
+        )
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
@@ -276,15 +382,25 @@ class LlamaAttention_KIVI(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+            attn_output = attn_output.split(
+                self.hidden_size // self.config.pretraining_tp, dim=2
+            )
+            o_proj_slices = self.o_proj.weight.split(
+                self.hidden_size // self.config.pretraining_tp, dim=1
+            )
+            attn_output = sum(
+                [
+                    F.linear(attn_output[i], o_proj_slices[i])
+                    for i in range(self.config.pretraining_tp)
+                ]
+            )
         else:
             attn_output = self.o_proj(attn_output)
 
         attn_weights = None
         return attn_output, attn_weights, past_key_value
-    
+
+
 class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
     def forward(
         self,
@@ -303,20 +419,31 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         bsz, q_len, _ = hidden_states.size()
 
         if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+            key_value_slicing = (
+                self.num_key_value_heads * self.head_dim
+            ) // self.config.pretraining_tp
             query_slices = self.q_proj.weight.split(
                 (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [
+                F.linear(hidden_states, query_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [
+                F.linear(hidden_states, key_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [
+                F.linear(hidden_states, value_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
@@ -324,56 +451,72 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
-            key_states_quant_trans  = past_key_value[0]     # qval.T       
-            key_states_full         = past_key_value[1]                    
-            key_scale_trans         = past_key_value[2]     # scale.T      
-            key_mn_trans            = past_key_value[3]     # zero_point.T 
-            value_states_quant      = past_key_value[4]     # qval.        
-            value_states_full       = past_key_value[5]                    
-            value_scale             = past_key_value[6]     # scale        
-            value_mn                = past_key_value[7]     # zero_point   
-            # NOTE: Add `smooth varible.` 
-            key_states_smooth       = past_key_value[8]     # key_states_smooth
-            value_states_smooth     = past_key_value[9]     # value_states_smooth
+            key_states_quant_trans = past_key_value[0]  # qval.T
+            key_states_full = past_key_value[1]
+            key_scale_trans = past_key_value[2]  # scale.T
+            key_mn_trans = past_key_value[3]  # zero_point.T
+            value_states_quant = past_key_value[4]  # qval.
+            value_states_full = past_key_value[5]
+            value_scale = past_key_value[6]  # scale
+            value_mn = past_key_value[7]  # zero_point
+            # NOTE: Add `smooth varible.`
+            key_states_smooth = past_key_value[8]  # key_states_smooth
+            value_states_smooth = past_key_value[9]  # value_states_smooth
             if key_states_quant_trans is not None:
-                # att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
+                # att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans,
                 #                 key_scale_trans, key_mn_trans, self.k_bits)
 
                 # NOTICE: Changed to pesudo quant
                 # NOTICE: Changed this into per-channel quantization.
                 # NOTE: Do GeMV with dequantization
                 dequant_key = unpack_and_dequant_kcache(
-                    key_states_quant_trans, 
-                    key_scale_trans.unsqueeze(-1), 
-                    key_mn_trans.unsqueeze(-1), 
-                    self.group_size, 
-                    self.k_bits
+                    key_states_quant_trans,
+                    key_scale_trans.unsqueeze(-1),
+                    key_mn_trans.unsqueeze(-1),
+                    self.group_size,
+                    self.k_bits,
                 )
                 # ).transpose(2, 3)
 
+                __import__("pdb").set_trace()
+
                 try:
                     batch, num_heads, seq_len, dim = dequant_key.shape
-                    dequant_key = dequant_key.view(batch, num_heads, -1, self.residual_length, dim) + key_states_smooth.unsqueeze(3).expand(-1, -1, -1, self.residual_length, -1)
+                    dequant_key = dequant_key.view(
+                        batch, num_heads, -1, self.residual_length, dim
+                    ) + key_states_smooth.unsqueeze(3).expand(
+                        -1, -1, -1, self.residual_length, -1
+                    )
                     dequant_key = dequant_key.view(batch, num_heads, seq_len, dim)
                 except RuntimeError as e:
-                    __import__('pdb').set_trace()
+                    __import__("pdb").set_trace()
 
-                att_qkquant_ref = torch.einsum("bhqd,bhkd->bhqk", query_states, dequant_key) # NOTE: Compute QK.
+                att_qkquant_ref = torch.einsum(
+                    "bhqd,bhkd->bhqk", query_states, dequant_key
+                )  # NOTE: Compute QK.
                 att_qkquant = att_qkquant_ref
 
-                # att_qkquant_ref = triton_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
+                # att_qkquant_ref = triton_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans,
                 #                 key_scale_trans, key_mn_trans, self.k_bits)
                 # error = torch.abs(att_qkquant - att_qkquant_ref).float()
                 # rel_error = torch.mean(error / (torch.abs(att_qkquant_ref).float()+1e-5))
@@ -384,32 +527,39 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states_full = torch.cat([key_states_full, key_states], dim=2)
             else:
                 key_states_full = key_states
-            att_qkfull = torch.matmul(query_states, repeat_kv(key_states_full, self.num_key_value_groups).transpose(2, 3))
+            att_qkfull = torch.matmul(
+                query_states,
+                repeat_kv(key_states_full, self.num_key_value_groups).transpose(2, 3),
+            )
             if att_qkquant is not None:
-                attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(self.head_dim)
+                attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(
+                    self.head_dim
+                )
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
-
-            __import__('pdb').set_trace()
 
             # NOTE: Following only call quant after residual_length.
             # NOTICE: K cache use `==` to generate per-channel quantization
             if key_states_full.shape[-2] == self.residual_length:
                 assert self.residual_length % self.group_size == 0
 
-                 # NOTE: Update the smooth varibles.
-                key_states_smooth_local = torch.mean(key_states_full, dim=2, keepdim=True)
+                # NOTE: Update the smooth varibles.
+                key_states_smooth_local = torch.mean(
+                    key_states_full, dim=2, keepdim=True
+                )
                 if key_states_smooth is not None:
-                    key_states_smooth = torch.cat([key_states_smooth, key_states_smooth_local], dim=2)
+                    key_states_smooth = torch.cat(
+                        [key_states_smooth, key_states_smooth_local], dim=2
+                    )
                 else:
                     key_states_smooth = key_states_smooth_local
 
                 # NOTICE: Change quant into per-token quantization.
                 key_states_full = key_states_full - key_states_smooth_local
-                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(
-                    key_states_full.contiguous(), 
-                    self.group_size, 
-                    self.k_bits
+                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = (
+                    triton_quantize_and_pack_along_last_dim(
+                        key_states_full.contiguous(), self.group_size, self.k_bits
+                    )
                 )
                 key_states_full = None
 
@@ -422,18 +572,24 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                     # key_mn_trans = torch.cat([key_mn_trans, key_mn_trans_new], dim=3)
 
                     try:
-                        key_states_quant_trans = torch.cat([key_states_quant_trans, key_states_quant_trans_new], dim=2)
-                        key_scale_trans = torch.cat([key_scale_trans, key_scale_trans_new], dim=2)
-                        key_mn_trans = torch.cat([key_mn_trans, key_mn_trans_new], dim=2)
+                        key_states_quant_trans = torch.cat(
+                            [key_states_quant_trans, key_states_quant_trans_new], dim=2
+                        )
+                        key_scale_trans = torch.cat(
+                            [key_scale_trans, key_scale_trans_new], dim=2
+                        )
+                        key_mn_trans = torch.cat(
+                            [key_mn_trans, key_mn_trans_new], dim=2
+                        )
                     except RuntimeError as e:
-                        __import__('pdb').set_trace()
+                        __import__("pdb").set_trace()
                 else:
                     key_states_quant_trans = key_states_quant_trans_new
                     key_scale_trans = key_scale_trans_new
                     key_mn_trans = key_mn_trans_new
 
             if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-                __import__('pdb').set_trace()
+                __import__("pdb").set_trace()
                 raise ValueError(
                     f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
                     f" {attn_weights.size()}"
@@ -450,44 +606,57 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 )
 
             # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
 
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
             if value_states_quant is None:
                 attn_output = torch.matmul(attn_weights, value_states_full)
             else:
-                # attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
+                # attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant,
                 #                                 value_scale, value_mn, self.v_bits)
 
-                # NOTE: Pesudo GeMV compute 
+                # NOTE: Pesudo GeMV compute
                 dequant_value = unpack_and_dequant_vcache(
-                    value_states_quant, 
-                    value_scale.unsqueeze(-1), 
-                    value_mn.unsqueeze(-1), 
-                    self.group_size, 
-                    self.v_bits
+                    value_states_quant,
+                    value_scale.unsqueeze(-1),
+                    value_mn.unsqueeze(-1),
+                    self.group_size,
+                    self.v_bits,
                 )
-                attn_output_ref = torch.einsum("bhqk,bhkd->bhqd", attn_weights[:, :, :, :-value_full_length], dequant_value)
+                attn_output_ref = torch.einsum(
+                    "bhqk,bhkd->bhqd",
+                    attn_weights[:, :, :, :-value_full_length],
+                    dequant_value,
+                )
                 attn_output = attn_output_ref
 
-                try :
-                    attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
+                try:
+                    attn_output += torch.matmul(
+                        attn_weights[:, :, :, -value_full_length:],
+                        repeat_kv(value_states_full, self.num_key_value_groups),
+                    )
                 except RuntimeError as e:
-                    __import__('pdb').set_trace()
+                    __import__("pdb").set_trace()
 
             # NOTICE: V cache use `>` to generate per-token quantization
             attn_output = attn_output.transpose(1, 2).contiguous()
             if value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
-                value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(
-                    value_states_full[:, :, :1, :].contiguous(), 
-                    self.group_size, 
-                    self.v_bits
+                value_states_quant_new, scale, mn = (
+                    triton_quantize_and_pack_along_last_dim(
+                        value_states_full[:, :, :1, :].contiguous(),
+                        self.group_size,
+                        self.v_bits,
+                    )
                 )
                 value_states_full = value_states_full[:, :, 1:, :].contiguous()
                 if value_states_quant is not None:
-                    value_states_quant = torch.cat([value_states_quant, value_states_quant_new], dim=2)
+                    value_states_quant = torch.cat(
+                        [value_states_quant, value_states_quant_new], dim=2
+                    )
                     value_scale = torch.cat([value_scale, scale], dim=2)
                     value_mn = torch.cat([value_mn, mn], dim=2)
                 else:
@@ -516,8 +685,12 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states = key_states.to(target_dtype)
                 value_states = value_states.to(target_dtype)
             attn_output = self._flash_attention_forward(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), 
-                value_states.transpose(1, 2), None, q_len, dropout=0.0
+                query_states.transpose(1, 2),
+                key_states.transpose(1, 2),
+                value_states.transpose(1, 2),
+                None,
+                q_len,
+                dropout=0.0,
             )
 
             if key_states.shape[-2] <= self.residual_length:
@@ -526,26 +699,36 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states_smooth = None
                 for i in range(key_states.shape[-2] // self.residual_length):
                     key_states_smooth_local = torch.mean(
-                        key_states[:, :, i * self.residual_length:(i + 1) * self.residual_length, :].contiguous(),
-                        dim = 2,
-                        keepdim=True
+                        key_states[
+                            :,
+                            :,
+                            i * self.residual_length : (i + 1) * self.residual_length,
+                            :,
+                        ].contiguous(),
+                        dim=2,
+                        keepdim=True,
                     )
                     if key_states_smooth is not None:
-                        key_states_smooth = torch.cat([key_states_smooth, key_states_smooth_local], dim=2)
+                        key_states_smooth = torch.cat(
+                            [key_states_smooth, key_states_smooth_local], dim=2
+                        )
                     else:
                         key_states_smooth = key_states_smooth_local
 
-
-            #> ===================================================================================================
-            #> NOTE: Do Quantization. 
-            #> ===================================================================================================
+            # > ===================================================================================================
+            # > NOTE: Do Quantization.
+            # > ===================================================================================================
             if key_states.shape[-2] % self.residual_length != 0:
                 if key_states.shape[-2] < self.residual_length:
                     key_states_quant = None
                     key_states_full = key_states
                 else:
-                    key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :].contiguous()
-                    key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
+                    key_states_quant = key_states[
+                        :, :, : -(key_states.shape[-2] % self.residual_length), :
+                    ].contiguous()
+                    key_states_full = key_states[
+                        :, :, -(key_states.shape[-2] % self.residual_length) :, :
+                    ].contiguous()
             else:
                 key_states_quant = key_states
                 key_states_full = None
@@ -553,70 +736,97 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             # NOTE: Subtract the smooth varible.
             try:
                 batch, num_heads, seq_len, dim = key_states_quant.shape
-                key_states_quant = key_states_quant.view(batch, num_heads, -1, self.residual_length, dim) - key_states_smooth.unsqueeze(3).expand(-1, -1, -1, self.residual_length, -1)
+                key_states_quant = key_states_quant.view(
+                    batch, num_heads, -1, self.residual_length, dim
+                ) - key_states_smooth.unsqueeze(3).expand(
+                    -1, -1, -1, self.residual_length, -1
+                )
                 key_states_quant = key_states_quant.view(batch, num_heads, seq_len, dim)
             except RuntimeError as e:
-                __import__('pdb').set_trace()
+                __import__("pdb").set_trace()
 
             if key_states_quant is not None:
                 # NOTICE: Change quant into per-token quantization.
                 #
                 # key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(key_states_quant.transpose(2, 3).contiguous(), self.group_size, self.k_bits)
-                key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(
-                    key_states_quant.contiguous(), 
-                    self.group_size, 
-                    self.k_bits
+                key_states_quant_trans, key_scale_trans, key_mn_trans = (
+                    triton_quantize_and_pack_along_last_dim(
+                        key_states_quant.contiguous(), self.group_size, self.k_bits
+                    )
                 )
             else:
                 key_states_quant_trans = None
                 key_scale_trans = None
                 key_mn_trans = None
-            
+
             if value_states.shape[-2] <= self.residual_length:
                 value_states_quant = None
                 value_states_full = value_states
                 value_scale = None
                 value_mn = None
             else:
-                value_states_quant = value_states[:, :, :-self.residual_length, :].contiguous()
-                value_states_full = value_states[:, :, -self.residual_length:, :].contiguous()
-                value_states_quant, value_scale, value_mn = triton_quantize_and_pack_along_last_dim(
-                    value_states_quant, 
-                    self.group_size, 
-                    self.v_bits
+                value_states_quant = value_states[
+                    :, :, : -self.residual_length, :
+                ].contiguous()
+                value_states_full = value_states[
+                    :, :, -self.residual_length :, :
+                ].contiguous()
+                value_states_quant, value_scale, value_mn = (
+                    triton_quantize_and_pack_along_last_dim(
+                        value_states_quant, self.group_size, self.v_bits
+                    )
                 )
 
             value_states_smooth = None
 
         past_key_value = (
-            key_states_quant_trans, 
-            key_states_full, 
-            key_scale_trans, 
-            key_mn_trans, 
-            value_states_quant, 
-            value_states_full, 
-            value_scale, 
-            value_mn, 
-            key_states_smooth,
-            value_states_smooth,
-            kv_seq_len
-        ) if use_cache else None
+            (
+                key_states_quant_trans,
+                key_states_full,
+                key_scale_trans,
+                key_mn_trans,
+                value_states_quant,
+                value_states_full,
+                value_scale,
+                value_mn,
+                key_states_smooth,
+                value_states_smooth,
+                kv_seq_len,
+            )
+            if use_cache
+            else None
+        )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+            attn_output = attn_output.split(
+                self.hidden_size // self.config.pretraining_tp, dim=2
+            )
+            o_proj_slices = self.o_proj.weight.split(
+                self.hidden_size // self.config.pretraining_tp, dim=1
+            )
+            attn_output = sum(
+                [
+                    F.linear(attn_output[i], o_proj_slices[i])
+                    for i in range(self.config.pretraining_tp)
+                ]
+            )
         else:
             attn_output = self.o_proj(attn_output)
 
         attn_weights = None
         return attn_output, attn_weights, past_key_value
 
-
     def _flash_attention_forward(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        dropout=0.0,
+        softmax_scale=None,
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
@@ -651,7 +861,14 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
             batch_size = query_states.shape[0]
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
+            (
+                query_states,
+                key_states,
+                value_states,
+                indices_q,
+                cu_seq_lens,
+                max_seq_lens,
+            ) = self._upad_input(
                 query_states, key_states, value_states, attention_mask, query_length
             )
 
@@ -671,28 +888,39 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 causal=self.is_causal,
             )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(
+                attn_output_unpad, indices_q, batch_size, query_length
+            )
         else:
             attn_output = flash_attn_func(
-                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=self.is_causal
+                query_states,
+                key_states,
+                value_states,
+                dropout,
+                softmax_scale=softmax_scale,
+                causal=self.is_causal,
             )
 
         return attn_output
 
-
-    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
+    def _upad_input(
+        self, query_layer, key_layer, value_layer, attention_mask, query_length
+    ):
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
         )
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
         )
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim),
+                indices_k,
             )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
@@ -707,7 +935,9 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
+                query_layer, attention_mask
+            )
 
         return (
             query_layer,
@@ -717,7 +947,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             (cu_seqlens_q, cu_seqlens_k),
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
-    
+
 
 class LlamaDecoderLayer_KIVI(nn.Module):
     def __init__(self, config: LlamaConfig):
@@ -730,7 +960,9 @@ class LlamaDecoderLayer_KIVI(nn.Module):
         )
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LlamaRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -741,7 +973,9 @@ class LlamaDecoderLayer_KIVI(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -793,6 +1027,7 @@ class LlamaDecoderLayer_KIVI(nn.Module):
 
         return outputs
 
+
 class LlamaModel_KIVI(LlamaPreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
@@ -806,8 +1041,12 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)])
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.layers = nn.ModuleList(
+            [LlamaDecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
@@ -833,17 +1072,27 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape[:2]
         elif inputs_embeds is not None:
@@ -858,7 +1107,10 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+                past_key_values_length,
+                seq_length + past_key_values_length,
+                dtype=torch.long,
+                device=device,
             )
             position_ids = position_ids.unsqueeze(0)
 
@@ -867,11 +1119,18 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
 
         if getattr(self.config, "_flash_attn_2_enabled", False):
             # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+            attention_mask = (
+                attention_mask
+                if (attention_mask is not None and 0 in attention_mask)
+                else None
+            )
         else:
             # 4d mask is passed through the layers
             attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                past_key_values_length,
             )
 
         # embed positions
@@ -893,7 +1152,9 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -931,13 +1192,18 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
+
 
 class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
@@ -970,7 +1236,9 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         return self.model
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(
+        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+    )
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1009,11 +1277,19 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -1030,8 +1306,13 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
 
         hidden_states = outputs[0]
         if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+            lm_head_slices = self.lm_head.weight.split(
+                self.vocab_size // self.config.pretraining_tp, dim=0
+            )
+            logits = [
+                F.linear(hidden_states, lm_head_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             logits = torch.cat(logits, dim=-1)
         else:
             logits = self.lm_head(hidden_states)
@@ -1063,7 +1344,12 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         )
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs,
     ):
         if isinstance(past_key_values, DynamicCache):
             past_key_values = past_key_values.to_legacy_cache()
@@ -1109,6 +1395,9 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:
             reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
+                tuple(
+                    past_state.index_select(0, beam_idx.to(past_state.device))
+                    for past_state in layer_past
+                ),
             )
         return reordered_past

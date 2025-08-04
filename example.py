@@ -19,7 +19,7 @@ import numpy as np
 
 np.set_printoptions(precision=4, suppress=True)
 
-torch.cuda.set_device(1)  # 设置使用 GPU2（索引1）
+torch.cuda.set_device(0)  # 设置使用 GPU2（索引1）
 
 # For reproducibility
 random.seed(0)

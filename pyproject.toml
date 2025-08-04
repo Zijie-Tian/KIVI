@@ -29,3 +29,16 @@ exclude = ["results*", "scripts*", "examples*"]
 
 [tool.wheel]
 exclude = ["results*", "scripts*", "examples*"]
+
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 88
+align_assignment_statement = true
+
+[tool.black]
+line-length = 88
+target-version = ['py310', 'py311']
+
+[tool.isort]
+profile = "black"
+line_length = 88
