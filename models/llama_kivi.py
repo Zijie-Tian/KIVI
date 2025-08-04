@@ -5,17 +5,33 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-from quant.new_pack import triton_quantize_and_pack_along_last_dim, unpack_and_dequant_kcache, unpack_and_dequant_vcache
-from quant.matmul import cuda_bmm_fA_qB_outer
-
-from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.cache_utils import DynamicCache
-from transformers.models.llama.modeling_llama import repeat_kv, LLAMA_INPUTS_DOCSTRING, LlamaRotaryEmbedding, LlamaMLP, LlamaRMSNorm, apply_rotary_pos_emb
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 from transformers.models.llama.configuration_llama import *
 from transformers.models.llama.modeling_llama import *
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+from transformers.models.llama.modeling_llama import (
+    LLAMA_INPUTS_DOCSTRING,
+    LlamaMLP,
+    LlamaRMSNorm,
+    LlamaRotaryEmbedding,
+    apply_rotary_pos_emb,
+    repeat_kv,
+)
+from transformers.utils import (
+    add_start_docstrings_to_model_forward,
+    replace_return_docstrings,
+)
+
+from quant.matmul import cuda_bmm_fA_qB_outer
+from quant.new_pack import (
+    triton_quantize_and_pack_along_last_dim,
+    unpack_and_dequant_kcache,
+    unpack_and_dequant_vcache,
+)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
@@ -126,7 +142,7 @@ class LlamaAttention_KIVI(nn.Module):
 
             #> Concat the KV cache.
             if key_states_full is not None:
-                key_states_full = torch.cat([key_states_full, key_states], dim=2)
+                key_states_full = torch.cat([key_states_full, key_states], dim=2) # NOTE: Append the new kv cache.
             else:
                 key_states_full = key_states
             att_qkfull = torch.matmul(query_states, key_states_full.transpose(2, 3))
@@ -140,6 +156,7 @@ class LlamaAttention_KIVI(nn.Module):
                 key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), 
                                                                                                                             self.group_size, 
                                                                                                                             self.k_bits)
+
                 key_states_full = None
                 if key_states_quant_trans is not None:
                     key_states_quant_trans = torch.cat([key_states_quant_trans, key_states_quant_trans_new], dim=3)
@@ -353,7 +370,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 except RuntimeError as e:
                     __import__('pdb').set_trace()
 
-                att_qkquant_ref = torch.einsum("bhqd,bhkd->bhqk", query_states, dequant_key)
+                att_qkquant_ref = torch.einsum("bhqd,bhkd->bhqk", query_states, dequant_key) # NOTE: Compute QK.
                 att_qkquant = att_qkquant_ref
 
                 # att_qkquant_ref = triton_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
@@ -372,6 +389,8 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(self.head_dim)
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
+
+            __import__('pdb').set_trace()
 
             # NOTE: Following only call quant after residual_length.
             # NOTICE: K cache use `==` to generate per-channel quantization
@@ -618,7 +637,16 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             softmax_scale (`float`, *optional*):
                 The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
         """
-        from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+        # v2 路径（向后兼容 fallback）
+        try:
+            from flash_attn.flash_attn_interface import (
+                flash_attn_func,
+                flash_attn_qkvpacked_func,  # 如后续需要
+                flash_attn_varlen_func,
+            )
+        except ImportError:  # 兼容极旧 v1
+            from flash_attn import flash_attn_func, flash_attn_varlen_func
 
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
@@ -910,7 +938,6 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
-
 
 class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]

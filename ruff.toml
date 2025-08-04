@@ -1,0 +1,15 @@
+# ruff.toml at project root
+line-length = 88
+indent-width = 4
+target-version = "py311"
+fix = true            # 自动启用 --fix 行为
+preview = false
+
+[lint]
+select = ["E", "I"]   # 启用所有 lint 错误和 import 相关规则
+ignore = ["E203"]     # 排除特定 lint 规则
+
+[format]
+docstring-code-format = true
+exclude = ["*.pyi"]   # 格式时排除 pyi 文件
+
