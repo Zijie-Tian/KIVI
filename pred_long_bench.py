@@ -251,8 +251,6 @@ if __name__ == "__main__":
     # tokenizer = AutoTokenizer.from_pretrained("togethercomputer/LLaMA-2-7B-32K")
     # model = AutoModelForCausalLM.from_pretrained("togethercomputer/LLaMA-2-7B-32K")
 
-    __import__("pdb").set_trace()
-
     model.eval()
     max_length = model2maxlen[model_name]
     if data_args.e:
