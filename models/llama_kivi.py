@@ -37,6 +37,26 @@ from quant.new_pack import (
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
+def compute_nmse(
+    pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8
+) -> torch.Tensor:
+    """
+    Compute the Normalized Mean Squared Error (NMSE) between two tensors.
+
+    Args:
+        pred (torch.Tensor): Predicted tensor.
+        target (torch.Tensor): Ground-truth tensor.
+        eps (float, optional): Small constant to avoid division by zero. Defaults to 1e-8.
+
+    Returns:
+        torch.Tensor: Scalar NMSE value.
+    """
+    mse = torch.mean((pred - target) ** 2)
+    norm_factor = torch.mean(target**2) + eps
+    nmse = mse / norm_factor
+    return nmse
+
+
 class LlamaAttention_KIVI(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -358,6 +378,7 @@ class LlamaAttention_KIVI(nn.Module):
             ).to(query_states.dtype)
 
             attn_output = torch.matmul(attn_weights, value_states)
+
         past_key_value = (
             (
                 key_states_quant_trans,
@@ -469,6 +490,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
         )
+
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
@@ -483,6 +505,9 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             # NOTE: Add `smooth varible.`
             key_states_smooth = past_key_value[8]  # key_states_smooth
             value_states_smooth = past_key_value[9]  # value_states_smooth
+            # NOTE: Add raw kv cache.
+            key_states_ref = past_key_value[10]
+            value_states_ref = past_key_value[11]
 
             if key_states_quant_trans is not None:
                 # att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans,
@@ -537,6 +562,11 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 )
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
+
+            # nmse = compute_nmse(
+            #     key_states_ref[:, :, : dequant_key.shape[2], :], dequant_key
+            # )
+            # __import__("pdb").set_trace()
 
             # NOTE: Following only call quant after residual_length.
             # NOTICE: K cache use `==` to generate per-channel quantization
@@ -780,6 +810,9 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
 
             value_states_smooth = None
 
+            key_states_ref = key_states
+            value_states_ref = value_states
+
         past_key_value = (
             (
                 key_states_quant_trans,
@@ -792,6 +825,8 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 value_mn,
                 key_states_smooth,
                 value_states_smooth,
+                key_states_ref,
+                value_states_ref,
                 kv_seq_len,
             )
             if use_cache

@@ -80,7 +80,8 @@ past_key_values = outputs.past_key_values
 
 __import__("pdb").set_trace()
 
-kvcache = []
+dequant_kvcache = []
+kvcache_ref = []
 for layer_id in range(len(past_key_values)):
     key_states_quant_trans = past_key_values[layer_id][0]  # qval.T
     key_states_full = past_key_values[layer_id][1]
@@ -93,6 +94,9 @@ for layer_id in range(len(past_key_values)):
     # NOTE: Add `smooth varible.`
     key_states_smooth = past_key_values[layer_id][8]  # key_states_smooth
     value_states_smooth = past_key_values[layer_id][9]  # value_states_smooth
+    # NOTE: Add raw kv cache.
+    key_states_ref = past_key_values[layer_id][10]
+    value_states_ref = past_key_values[layer_id][11]
 
     # NOTE: Dequantized  key and value.
     dequant_key = unpack_and_dequant_kcache(
@@ -104,6 +108,7 @@ for layer_id in range(len(past_key_values)):
     )
 
     # NOTE: Subtract the smooth variable.
+    # NOTICE: This group_size is wrong.
     batch, num_heads, seq_len, dim = dequant_key.shape
     dequant_key = dequant_key.view(
         batch, num_heads, -1, config.group_size, dim
@@ -117,9 +122,15 @@ for layer_id in range(len(past_key_values)):
         config.group_size,
         config.v_bits,
     )
-    kvcache.append([dequant_key, dequant_value])
+
+    key_cache_cat = torch.cat([dequant_key, key_states_full], dim=2)
+    value_cache_cat = torch.cat([dequant_value, value_states_full], dim=2)
+
+    dequant_kvcache.append([key_cache_cat, value_cache_cat])
+    kvcache_ref.append([key_states_ref, value_states_ref])
 
 __import__("pdb").set_trace()
 
-# torch.save(kvcache, f'./{MODEL_NAME}_kvcache.pt')
-# torch.save(attentions, f'./{MODEL_NAME}_attention.pt')
+torch.save(dequant_kvcache, f"./{MODEL_NAME}_kvcache.pt")
+torch.save(kvcache_ref, f"./{MODEL_NAME}_kvcache_ref.pt")
+torch.save(attentions, f"./{MODEL_NAME}_attention.pt")
