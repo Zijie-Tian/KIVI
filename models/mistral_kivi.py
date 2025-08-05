@@ -21,6 +21,7 @@
 
 import inspect
 import math
+import pdb
 import warnings
 from typing import List, Optional, Tuple, Union
 
@@ -468,7 +469,7 @@ class MistralFlashAttention_KIVI(MistralAttention_KIVI):
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
         rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
-        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids)
 
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
