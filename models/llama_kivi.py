@@ -1,4 +1,5 @@
 import math
+import pdb
 import warnings
 from typing import List, Optional, Tuple, Union
 
@@ -482,6 +483,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             # NOTE: Add `smooth varible.`
             key_states_smooth = past_key_value[8]  # key_states_smooth
             value_states_smooth = past_key_value[9]  # value_states_smooth
+
             if key_states_quant_trans is not None:
                 # att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans,
                 #                 key_scale_trans, key_mn_trans, self.k_bits)
@@ -497,8 +499,6 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                     self.k_bits,
                 )
                 # ).transpose(2, 3)
-
-                __import__("pdb").set_trace()
 
                 try:
                     batch, num_heads, seq_len, dim = dequant_key.shape
@@ -693,6 +693,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 dropout=0.0,
             )
 
+            # NOTE: If kv_len > self.residual_length, we split the kv lens into multiple stripe.
             if key_states.shape[-2] <= self.residual_length:
                 key_states_smooth = None
             else:
@@ -1101,6 +1102,7 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
         past_key_values_length = 0
+
         if past_key_values is not None:
             past_key_values_length = past_key_values[0][-1]
 
@@ -1355,6 +1357,7 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
             past_key_values = past_key_values.to_legacy_cache()
             if len(past_key_values) == 0:
                 past_key_values = None
+
         if past_key_values is not None:
             past_length = past_key_values[0][-1]
             # Some generation methods already pass only the last input ID

@@ -32,8 +32,8 @@ config = LlamaConfig.from_pretrained(f"/workspace/models/{MODEL_NAME}")
 
 config.k_bits = 2  # KiVi currently support 2/4 K/V bits
 config.v_bits = 2
-config.group_size = 32
-config.residual_length = 32  # corresponding to the number of recent fp16 tokens
+config.group_size = 128
+config.residual_length = 128  # corresponding to the number of recent fp16 tokens
 config.use_flash = True
 # TODO: USE following config to evaluate smoothing mechianism
 config.smooth_step = 8
